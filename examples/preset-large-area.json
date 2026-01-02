@@ -1,0 +1,13 @@
+{
+  "name": "Large Area Mining",
+  "minX": 0,
+  "minY": 0,
+  "minZ": 0,
+  "maxX": 64,
+  "maxY": 32,
+  "maxZ": 64,
+  "speed": 2.0,
+  "useWhitelist": false,
+  "whitelist": [],
+  "blacklist": []
+}

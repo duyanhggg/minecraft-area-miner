@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "area-miner",
+  "version": "${version}",
+  "name": "Area Miner",
+  "description": "An advanced area mining mod for Minecraft with GUI, visualization, and multiplayer support",
+  "authors": [
+    "duyanhggg"
+  ],
+  "contact": {
+    "homepage": "https://github.com/duyanhggg/minecraft-area-miner",
+    "sources": "https://github.com/duyanhggg/minecraft-area-miner"
+  },
+  "license": "MIT",
+  "icon": "assets/area-miner/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.duyanhggg.areaminer.AreaMiner"
+    ],
+    "client": [
+      "com.duyanhggg.areaminer.AreaMinerClient"
+    ]
+  },
+  "mixins": [
+    "area-miner.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "another-mod": "*"
+  }
+}

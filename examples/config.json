@@ -1,0 +1,19 @@
+{
+  "autoLoadLastConfig": true,
+  "enableSounds": true,
+  "enableParticles": true,
+  "defaultMiningSpeed": 1.0,
+  "visualizationEnabled": true,
+  "visualizationColor": 65280,
+  "visualizationAlpha": 0.3,
+  "requireOpOnServers": true,
+  "logMiningOperations": true,
+  "lastMinX": 0,
+  "lastMinY": 64,
+  "lastMinZ": 0,
+  "lastMaxX": 16,
+  "lastMaxY": 80,
+  "lastMaxZ": 16,
+  "lastSpeed": 1.0,
+  "lastUseWhitelist": false
+}

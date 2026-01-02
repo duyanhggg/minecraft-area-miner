@@ -1,259 +1,401 @@
 package com.duyanhggg.areaminer.mining;
 
-import com.duyanhggg.areaminer.AreaMiner;
-import com.duyanhggg.areaminer.config.ConfigManager;
-import com.duyanhggg.areaminer.network.NetworkHandler;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.sound.SoundCategory;
-import net.minecraft.sound.SoundEvents;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.block.Block;
+import org.bukkit.entity.Player;
+import org.bukkit.scheduler.BukkitScheduler;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * MiningController - Manages mining sessions and block extraction
+ * Handles session creation, block list building, and mining operations
+ */
 public class MiningController {
-    private static final Map<UUID, MiningSession> sessions = new HashMap<>();
-    private static int tickCounter = 0;
     
-    public static void initialize() {
-        ServerTickEvents.END_SERVER_TICK.register(MiningController::onServerTick);
+    private static MiningController instance;
+    private final Map<UUID, MiningSession> activeSessions;
+    private final BukkitScheduler scheduler;
+    private final int maxSessionDuration; // in ticks
+    private final int blockBatchSize;
+    private final int maxBlocksPerSession;
+    
+    private MiningController(BukkitScheduler scheduler) {
+        this.activeSessions = new ConcurrentHashMap<>();
+        this.scheduler = scheduler;
+        this.maxSessionDuration = 20 * 60 * 60; // 60 minutes in ticks
+        this.blockBatchSize = 100; // Process blocks in batches
+        this.maxBlocksPerSession = 10000; // Maximum blocks per session
     }
     
-    private static void onServerTick(MinecraftServer server) {
-        tickCounter++;
-        
-        // Process mining sessions
-        Iterator<Map.Entry<UUID, MiningSession>> iterator = sessions.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<UUID, MiningSession> entry = iterator.next();
-            MiningSession session = entry.getValue();
-            
-            if (session.isActive()) {
-                session.tick(server);
-            }
-            
-            if (session.isComplete()) {
-                iterator.remove();
-            }
+    /**
+     * Get singleton instance of MiningController
+     */
+    public static MiningController getInstance(BukkitScheduler scheduler) {
+        if (instance == null) {
+            instance = new MiningController(scheduler);
         }
+        return instance;
     }
     
-    public static MiningSession getSession(UUID playerId) {
-        return sessions.get(playerId);
+    /**
+     * Get singleton instance (requires prior initialization)
+     */
+    public static MiningController getInstance() {
+        if (instance == null) {
+            throw new IllegalStateException("MiningController not initialized. Call getInstance(scheduler) first.");
+        }
+        return instance;
     }
     
-    public static MiningSession createSession(ServerPlayerEntity player, MiningArea area, float speed) {
-        UUID playerId = player.getUuid();
-        MiningSession session = new MiningSession(player, area, speed);
-        sessions.put(playerId, session);
+    /**
+     * Create a new mining session for a player
+     */
+    public MiningSession createSession(Player player, Location corner1, Location corner2) {
+        if (activeSessions.containsKey(player.getUniqueId())) {
+            return activeSessions.get(player.getUniqueId());
+        }
+        
+        MiningSession session = new MiningSession(
+            player.getUniqueId(),
+            player.getName(),
+            corner1,
+            corner2,
+            System.currentTimeMillis()
+        );
+        
+        activeSessions.put(player.getUniqueId(), session);
         return session;
     }
     
-    public static void stopSession(UUID playerId) {
-        MiningSession session = sessions.get(playerId);
+    /**
+     * Get active session for a player
+     */
+    public MiningSession getSession(UUID playerUuid) {
+        return activeSessions.get(playerUuid);
+    }
+    
+    /**
+     * Get active session for a player by name
+     */
+    public MiningSession getSession(String playerName) {
+        return activeSessions.values().stream()
+            .filter(session -> session.getPlayerName().equalsIgnoreCase(playerName))
+            .findFirst()
+            .orElse(null);
+    }
+    
+    /**
+     * End a mining session
+     */
+    public void endSession(UUID playerUuid) {
+        MiningSession session = activeSessions.remove(playerUuid);
         if (session != null) {
-            session.stop();
+            session.cleanup();
         }
     }
     
-    public static void pauseSession(UUID playerId) {
-        MiningSession session = sessions.get(playerId);
-        if (session != null) {
-            session.pause();
-        }
+    /**
+     * End a mining session by player name
+     */
+    public void endSession(String playerName) {
+        activeSessions.entrySet().removeIf(entry -> 
+            entry.getValue().getPlayerName().equalsIgnoreCase(playerName)
+        );
     }
     
-    public static void resumeSession(UUID playerId) {
-        MiningSession session = sessions.get(playerId);
-        if (session != null) {
-            session.resume();
-        }
+    /**
+     * Check if player has an active session
+     */
+    public boolean hasActiveSession(UUID playerUuid) {
+        return activeSessions.containsKey(playerUuid);
     }
     
-    public static void removeSession(UUID playerId) {
-        sessions.remove(playerId);
+    /**
+     * Get all active sessions
+     */
+    public Collection<MiningSession> getAllActiveSessions() {
+        return new ArrayList<>(activeSessions.values());
     }
     
-    public static boolean hasActiveSession(UUID playerId) {
-        MiningSession session = sessions.get(playerId);
-        return session != null && session.isActive();
+    /**
+     * Build a list of mineable blocks within the specified region
+     */
+    public List<Block> buildBlockList(Location corner1, Location corner2, Set<Material> minableMaterials) {
+        return buildBlockList(corner1, corner2, minableMaterials, maxBlocksPerSession);
     }
     
-    public static class MiningSession {
-        private final ServerPlayerEntity player;
-        private final MiningArea area;
-        private final float speed;
-        private final List<BlockPos> blocksToMine;
-        private int currentIndex;
-        private boolean active;
-        private boolean paused;
-        private boolean complete;
-        private int blocksMined;
-        private long startTime;
-        private float miningProgress;
+    /**
+     * Build a list of mineable blocks within the specified region with block limit
+     */
+    public List<Block> buildBlockList(Location corner1, Location corner2, 
+                                      Set<Material> minableMaterials, int maxBlocks) {
+        List<Block> blockList = new ArrayList<>();
         
-        public MiningSession(ServerPlayerEntity player, MiningArea area, float speed) {
-            this.player = player;
-            this.area = area;
-            this.speed = Math.max(0.1f, Math.min(10f, speed));
-            this.blocksToMine = new ArrayList<>();
-            this.currentIndex = 0;
-            this.active = false;
-            this.paused = false;
-            this.complete = false;
-            this.blocksMined = 0;
-            this.startTime = System.currentTimeMillis();
-            this.miningProgress = 0;
-            
-            // Build list of blocks to mine
-            buildBlockList();
+        if (corner1.getWorld() == null || corner2.getWorld() == null) {
+            return blockList;
         }
         
-        private void buildBlockList() {
-            BlockPos min = area.getMinPos();
-            BlockPos max = area.getMaxPos();
-            
-            int minX = Math.min(min.getX(), max.getX());
-            int maxX = Math.max(min.getX(), max.getX());
-            int minY = Math.min(min.getY(), max.getY());
-            int maxY = Math.max(min.getY(), max.getY());
-            int minZ = Math.min(min.getZ(), max.getZ());
-            int maxZ = Math.max(min.getZ(), max.getZ());
-            
-            ServerWorld world = player.getServerWorld();
-            
+        if (!corner1.getWorld().equals(corner2.getWorld())) {
+            return blockList;
+        }
+        
+        // Normalize coordinates
+        int minX = Math.min(corner1.getBlockX(), corner2.getBlockX());
+        int maxX = Math.max(corner1.getBlockX(), corner2.getBlockX());
+        int minY = Math.min(corner1.getBlockY(), corner2.getBlockY());
+        int maxY = Math.max(corner1.getBlockY(), corner2.getBlockY());
+        int minZ = Math.min(corner1.getBlockZ(), corner2.getBlockZ());
+        int maxZ = Math.max(corner1.getBlockZ(), corner2.getBlockZ());
+        
+        // Calculate total volume
+        long volume = (long) (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+        
+        if (volume > 1000000) { // 1 million blocks limit
+            Bukkit.getLogger().warning("Area too large for mining: " + volume + " blocks");
+            return blockList;
+        }
+        
+        // Iterate through blocks and collect mineable ones
+        for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
-                for (int x = minX; x <= maxX; x++) {
-                    for (int z = minZ; z <= maxZ; z++) {
-                        BlockPos pos = new BlockPos(x, y, z);
-                        BlockState state = world.getBlockState(pos);
-                        Block block = state.getBlock();
-                        
-                        if (!state.isAir() && area.canMineBlock(block)) {
-                            blocksToMine.add(pos);
-                        }
+                for (int z = minZ; z <= maxZ; z++) {
+                    if (blockList.size() >= maxBlocks) {
+                        return blockList;
+                    }
+                    
+                    Block block = corner1.getWorld().getBlockAt(x, y, z);
+                    
+                    if (isMineable(block, minableMaterials)) {
+                        blockList.add(block);
                     }
                 }
             }
         }
         
-        public void start() {
-            this.active = true;
-            this.paused = false;
-            AreaMiner.LOGGER.info("Mining session started for player {} with {} blocks to mine", 
-                player.getName().getString(), blocksToMine.size());
+        return blockList;
+    }
+    
+    /**
+     * Check if a block is mineable based on material set
+     */
+    private boolean isMineable(Block block, Set<Material> minableMaterials) {
+        if (block == null || block.getType() == Material.AIR) {
+            return false;
         }
         
-        public void stop() {
-            this.active = false;
-            this.complete = true;
-            AreaMiner.LOGGER.info("Mining session stopped for player {}, mined {} blocks", 
-                player.getName().getString(), blocksMined);
+        if (minableMaterials.isEmpty()) {
+            return false;
         }
         
-        public void pause() {
-            this.paused = true;
+        return minableMaterials.contains(block.getType());
+    }
+    
+    /**
+     * Start mining blocks in a session asynchronously
+     */
+    public void startMiningSession(MiningSession session, Set<Material> minableMaterials) {
+        Player player = Bukkit.getPlayer(session.getPlayerUuid());
+        if (player == null) {
+            endSession(session.getPlayerUuid());
+            return;
         }
         
-        public void resume() {
-            this.paused = false;
+        // Build block list
+        List<Block> blockList = buildBlockList(
+            session.getCorner1(),
+            session.getCorner2(),
+            minableMaterials
+        );
+        
+        session.setTotalBlocks(blockList.size());
+        
+        // Process blocks in batches
+        processMiningBatches(session, blockList, 0);
+    }
+    
+    /**
+     * Process mining blocks in batches to avoid server lag
+     */
+    private void processMiningBatches(MiningSession session, List<Block> blockList, int startIndex) {
+        if (startIndex >= blockList.size()) {
+            session.markAsCompleted();
+            return;
         }
         
-        public void tick(MinecraftServer server) {
-            if (!active || paused || complete) {
-                return;
+        int endIndex = Math.min(startIndex + blockBatchSize, blockList.size());
+        
+        // Process batch
+        for (int i = startIndex; i < endIndex; i++) {
+            Block block = blockList.get(i);
+            if (block != null && block.getType() != Material.AIR) {
+                block.setType(Material.AIR);
+                session.incrementBlocksMined();
             }
-            
-            // Calculate how many blocks to mine this tick based on speed
-            miningProgress += speed;
-            int blocksThisTick = (int) miningProgress;
-            miningProgress -= blocksThisTick;
-            
-            ServerWorld world = player.getServerWorld();
-            
-            for (int i = 0; i < blocksThisTick && currentIndex < blocksToMine.size(); i++) {
-                BlockPos pos = blocksToMine.get(currentIndex);
-                BlockState state = world.getBlockState(pos);
-                
-                if (!state.isAir()) {
-                    // Break the block
-                    world.breakBlock(pos, true, player);
-                    blocksMined++;
-                    
-                    // Spawn particles
-                    world.syncWorldEvent(2001, pos, Block.getRawIdFromState(state));
-                }
-                
-                currentIndex++;
-            }
-            
-            // Check if mining is complete
-            if (currentIndex >= blocksToMine.size()) {
-                complete();
-            }
-            
-            // Send progress update to client every 20 ticks
-            if (tickCounter % 20 == 0) {
-                NetworkHandler.sendMiningProgressToClient(player, getProgress());
-            }
         }
         
-        private void complete() {
-            this.active = false;
-            this.complete = true;
-            
-            // Play completion sound
-            player.getServerWorld().playSound(
-                null,
-                player.getBlockPos(),
-                SoundEvents.ENTITY_PLAYER_LEVELUP,
-                SoundCategory.PLAYERS,
-                1.0f,
-                1.0f
+        // Schedule next batch
+        if (endIndex < blockList.size()) {
+            final int nextStart = endIndex;
+            scheduler.scheduleSyncDelayedTask(
+                Bukkit.getPluginManager().getPlugins()[0],
+                () -> processMiningBatches(session, blockList, nextStart),
+                1L // 1 tick delay between batches
             );
-            
-            AreaMiner.LOGGER.info("Mining session completed for player {}, mined {} blocks in {} ms", 
-                player.getName().getString(), blocksMined, System.currentTimeMillis() - startTime);
+        } else {
+            session.markAsCompleted();
+        }
+    }
+    
+    /**
+     * Get statistics for a session
+     */
+    public Map<String, Object> getSessionStats(UUID playerUuid) {
+        MiningSession session = getSession(playerUuid);
+        if (session == null) {
+            return Collections.emptyMap();
         }
         
-        public boolean isActive() {
-            return active && !complete;
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("player", session.getPlayerName());
+        stats.put("totalBlocks", session.getTotalBlocks());
+        stats.put("blocksMined", session.getBlocksMined());
+        stats.put("progress", String.format("%.2f%%", session.getProgress()));
+        stats.put("isCompleted", session.isCompleted());
+        stats.put("startTime", new Date(session.getStartTime()));
+        stats.put("duration", System.currentTimeMillis() - session.getStartTime());
+        
+        return stats;
+    }
+    
+    /**
+     * Clean up expired sessions
+     */
+    public void cleanupExpiredSessions() {
+        long currentTime = System.currentTimeMillis();
+        activeSessions.entrySet().removeIf(entry -> {
+            MiningSession session = entry.getValue();
+            long sessionAge = currentTime - session.getStartTime();
+            return sessionAge > (maxSessionDuration * 50); // Convert ticks to milliseconds
+        });
+    }
+    
+    /**
+     * Cleanup all sessions
+     */
+    public void cleanupAll() {
+        activeSessions.values().forEach(MiningSession::cleanup);
+        activeSessions.clear();
+    }
+    
+    /**
+     * Get session count
+     */
+    public int getActiveSessionCount() {
+        return activeSessions.size();
+    }
+    
+    /**
+     * Inner class representing a mining session
+     */
+    public static class MiningSession {
+        private final UUID playerUuid;
+        private final String playerName;
+        private final Location corner1;
+        private final Location corner2;
+        private final long startTime;
+        private volatile int totalBlocks;
+        private volatile int blocksMined;
+        private volatile boolean completed;
+        private final Map<String, Object> metadata;
+        
+        public MiningSession(UUID playerUuid, String playerName, Location corner1, 
+                           Location corner2, long startTime) {
+            this.playerUuid = playerUuid;
+            this.playerName = playerName;
+            this.corner1 = corner1.clone();
+            this.corner2 = corner2.clone();
+            this.startTime = startTime;
+            this.totalBlocks = 0;
+            this.blocksMined = 0;
+            this.completed = false;
+            this.metadata = new ConcurrentHashMap<>();
         }
         
-        public boolean isPaused() {
-            return paused;
+        public UUID getPlayerUuid() {
+            return playerUuid;
         }
         
-        public boolean isComplete() {
-            return complete;
+        public String getPlayerName() {
+            return playerName;
+        }
+        
+        public Location getCorner1() {
+            return corner1;
+        }
+        
+        public Location getCorner2() {
+            return corner2;
+        }
+        
+        public long getStartTime() {
+            return startTime;
+        }
+        
+        public int getTotalBlocks() {
+            return totalBlocks;
+        }
+        
+        public void setTotalBlocks(int totalBlocks) {
+            this.totalBlocks = totalBlocks;
         }
         
         public int getBlocksMined() {
             return blocksMined;
         }
         
-        public int getTotalBlocks() {
-            return blocksToMine.size();
+        public void incrementBlocksMined() {
+            this.blocksMined++;
         }
         
-        public float getProgress() {
-            if (blocksToMine.isEmpty()) {
-                return 1.0f;
+        public void addBlocksMined(int count) {
+            this.blocksMined += count;
+        }
+        
+        public double getProgress() {
+            if (totalBlocks == 0) {
+                return 0.0;
             }
-            return (float) blocksMined / blocksToMine.size();
+            return (blocksMined / (double) totalBlocks) * 100.0;
         }
         
-        public long getElapsedTime() {
-            return System.currentTimeMillis() - startTime;
+        public boolean isCompleted() {
+            return completed;
         }
         
-        public MiningArea getArea() {
-            return area;
+        public void markAsCompleted() {
+            this.completed = true;
+        }
+        
+        public void setMetadata(String key, Object value) {
+            metadata.put(key, value);
+        }
+        
+        public Object getMetadata(String key) {
+            return metadata.get(key);
+        }
+        
+        public void cleanup() {
+            metadata.clear();
+        }
+        
+        @Override
+        public String toString() {
+            return String.format("MiningSession{player=%s, blocks=%d/%d, progress=%.2f%%}",
+                playerName, blocksMined, totalBlocks, getProgress());
         }
     }
 }
